@@ -1,6 +1,5 @@
 use futures::TryFutureExt;
 use std::marker::Unpin;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 use super::block::{Block, BlockColumnHeader, EmptyBlock, OutputBlockWrapper, ServerBlock};
@@ -16,7 +15,6 @@ pub struct InsertSink<'a, R: AsyncRead + Unpin + Send, W> {
     pub(crate) inner: ResponseStream<'a, R>,
     pub(crate) sink: CommandSink<W>,
     pub(crate) buf: Vec<u8>,
-    pub(crate) timeout: Duration,
     #[allow(dead_code)]
     pub(crate) columns: Vec<BlockColumnHeader>,
 }
@@ -32,7 +30,6 @@ impl<'a, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin> InsertSink<'a, R, W
         tcpstream: ResponseStream<'a, R>,
         sink: CommandSink<W>,
         block: ServerBlock,
-        timeout: Duration,
     ) -> InsertSink<'a, R, W> {
         let buf = Vec::with_capacity(DEFAULT_INSERT_BUFFER_SIZE);
 
@@ -48,7 +45,6 @@ impl<'a, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin> InsertSink<'a, R, W
             inner: tcpstream,
             sink,
             buf,
-            timeout,
             columns,
         }
     }
@@ -119,7 +115,7 @@ impl<'a, R: AsyncRead + Unpin + Send, W: AsyncWrite + Unpin> InsertSink<'a, R, W
         EmptyBlock.write(self.inner.info_ref(), &mut self.buf)?;
         self.sink.writer.write_all(self.buf.as_ref()).await?;
 
-        if let Some(packet) = self.inner.next(self.timeout).await? {
+        if let Some(packet) = self.inner.next().await? {
             return Err(DriverError::PacketOutOfOrder(packet.code()).into());
         }
         // Disable fuse. it allows us to make intermediate  commits

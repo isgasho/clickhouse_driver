@@ -244,6 +244,14 @@ impl Options {
         self.compression = compression;
         self
     }
+
+    pub fn set_timeout(mut self, timeout: Duration) -> Self {
+        self.ping_timeout = timeout;
+        self.execute_timeout = timeout;
+        self.query_timeout = timeout;
+        self.insert_timeout = timeout;
+        self
+    }
 }
 
 impl fmt::Debug for Options {

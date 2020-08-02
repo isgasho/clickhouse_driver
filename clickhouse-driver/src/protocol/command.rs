@@ -1,5 +1,5 @@
 use chrono_tz::Tz;
-use futures::Future;
+use futures::{Future, TryFutureExt};
 use std::borrow::BorrowMut;
 use std::marker::Unpin;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use super::packet::{ProfileInfo, Response};
 use super::value::{ValueDate, ValueDateTime, ValueDateTime64, ValueIp4, ValueIp6, ValueUuid};
 use super::ServerInfo;
 use crate::compression::LZ4ReadAdapter;
-use crate::errors::{self, DriverError, Exception, Result, ServerError};
+use crate::errors::{DriverError, Exception, Result, ServerError};
 use crate::protocol::column::{BoxString, LowCardinalityColumn};
 use crate::protocol::decoder::ValueReader;
 #[cfg(feature = "int128")]
@@ -32,17 +32,27 @@ const GLOBAL_DICTIONARY: u64 = 0x0100;
 const ADDITIONAL_KEY: u64 = 0x0200;
 //const UPDATE_KEY: u64 = 0x0400;
 
+// pub(crate) async fn with_timeout<F, T, E>(fut: F, timeout: Duration) -> Result<T>
+// where
+//     F: Future<Output = std::result::Result<T, E>>,
+//     E: Into<errors::Error>,
+// {
+//     match time::timeout(timeout, fut).await {
+//         Ok(Ok(res)) => Ok(res),
+//         Ok(Err(e)) => err!(e),
+//         Err(_) => err!(crate::errors::DriverError::ConnectionTimeout),
+//     }
+// }
+
 /// Wait future result with timeout
-pub(crate) async fn with_timeout<F, T, E>(fut: F, timeout: Duration) -> Result<T>
+fn with_timeout<F, T>(fut: F, timeout: Duration) -> impl Future<Output = Result<T>>
 where
-    F: Future<Output = std::result::Result<T, E>>,
-    E: Into<errors::Error>,
+    F: Future<Output = Result<T>>,
 {
-    match time::timeout(timeout, fut).await {
-        Ok(Ok(res)) => Ok(res),
-        Ok(Err(e)) => err!(e),
-        Err(_) => err!(crate::errors::DriverError::ConnectionTimeout),
-    }
+    time::timeout(timeout, fut).map_ok_or_else(
+        |_| Err(crate::errors::DriverError::ConnectionTimeout.into()),
+        |ok| ok,
+    )
 }
 
 pub(crate) struct CommandSink<W> {
@@ -56,17 +66,16 @@ impl<W> CommandSink<W> {
 }
 
 impl<W: AsyncWrite + Unpin> CommandSink<W> {
-    pub(crate) async fn cancel(&mut self) -> Result<()> {
+    pub(crate) async fn cancel(&mut self) -> Result<usize> {
         let mut buf = Vec::with_capacity(1);
         CLIENT_CANCEL.encode(&mut buf)?;
-
-        self.writer.write(buf.as_ref()).await?;
-        Ok(())
+        self.writer.write(buf.as_ref()).map_err(Into::into).await
     }
 }
 
 pub(crate) struct ResponseStream<'a, R: AsyncRead> {
     fuse: bool,
+    timeout: Duration,
     pub(crate) skip_empty: bool,
     info: &'a mut ServerInfo,
     reader: LZ4ReadAdapter<BufReader<R>>,
@@ -82,6 +91,7 @@ impl<'a, R: AsyncRead + Unpin + Send> ResponseStream<'a, R> {
         capacity: usize,
         tcpstream: R,
         info: &'a mut ServerInfo,
+        timeout: Duration,
     ) -> ResponseStream<'a, R> {
         let compression = info.compression;
         ResponseStream {
@@ -92,6 +102,7 @@ impl<'a, R: AsyncRead + Unpin + Send> ResponseStream<'a, R> {
                 BufReader::with_capacity(capacity, tcpstream),
                 compression,
             ),
+            timeout,
             columns: Vec::new(),
         }
     }
@@ -130,6 +141,7 @@ impl<'a, R: AsyncRead + Unpin + Send> ResponseStream<'a, R> {
         let mut code = [0u8; 1];
         loop {
             if 0 == self.reader.inner_ref().read(&mut code[..]).await? {
+                // FIXME: it may be better to raise error 'Connection unexpectedly closed by server'
                 return Ok(None);
             }
 
@@ -204,9 +216,16 @@ impl<'a, R: AsyncRead + Unpin + Send> ResponseStream<'a, R> {
     }
 
     #[inline]
-    pub(crate) async fn next(&mut self, timeout: Duration) -> Result<Option<Response>> {
+    pub(crate) async fn next(&mut self) -> Result<Option<Response>> {
+        let timeout = self.timeout;
         with_timeout(self.inner_next(), timeout).await
+        //self.inner_next().await
     }
+
+    // #[inline]
+    // pub(crate) async fn next_timeout(&mut self, timeout: Duration) -> Result<Option<Response>> {
+    //     with_timeout(self.inner_next(), timeout).await
+    // }
 }
 
 async fn read_block_info<R>(reader: R) -> Result<BlockInfo>
