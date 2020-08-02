@@ -25,9 +25,12 @@ use tokio::net::tcp::{ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 
 const DEF_OUT_BUF_SIZE: usize = 512;
+const DEFAULT_QUERY_BUF_SIZE: usize = 8 * 1024;
 /// Connection state flags
 const FLAG_DETERIORATED: u8 = 0x01;
 const FLAG_PENDING: u8 = 0x02;
+
+
 
 #[derive(Debug)]
 pub(super) struct ServerInfo {
@@ -346,7 +349,7 @@ impl Connection {
         let (mut stream, mut sink, buf) =
             self.write_command(&Execute { query }, self.options().execute_timeout)?;
         sink.writer.write_all(buf).await?;
-
+        buf.truncate( DEF_OUT_BUF_SIZE);
         if let Some(packet) = stream.next().await? {
             warn!("execute method returns packet {}", packet.code());
             return Err(DriverError::PacketOutOfOrder(packet.code()).into());
@@ -427,7 +430,6 @@ impl Connection {
         CommandSink<WriteHalf<'_>>,
         &mut Vec<u8>, //&[u8],
     )> {
-        // TODO: ("truncate output buffer upon completion ");
         self.out.clear();
 
         let (rdr, wrt, info) = if let Some((rdr, wrt, info)) = self.inner.split() {
@@ -440,7 +442,7 @@ impl Connection {
         info.set_pending();
 
         Ok((
-            ResponseStream::with_capacity(8 * 1024, rdr, info, timeout),
+            ResponseStream::with_capacity(DEFAULT_QUERY_BUF_SIZE, rdr, info, timeout),
             CommandSink::new(wrt),
             self.out.as_mut(), //self.out.as_ref(),
         ))
