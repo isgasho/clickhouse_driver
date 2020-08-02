@@ -9,7 +9,6 @@ use tokio::time;
 use super::block::{BlockColumn, BlockColumnHeader, BlockInfo, ServerBlock};
 use super::code::*;
 use super::column::{AsInColumn, EnumColumn, FixedColumn, StringColumn};
-use super::encoder::Encoder;
 use super::packet::{ProfileInfo, Response};
 use super::value::{ValueDate, ValueDateTime, ValueDateTime64, ValueIp4, ValueIp6, ValueUuid};
 use super::ServerInfo;
@@ -66,10 +65,10 @@ impl<W> CommandSink<W> {
 }
 
 impl<W: AsyncWrite + Unpin> CommandSink<W> {
-    pub(crate) async fn cancel(&mut self) -> Result<usize> {
-        let mut buf = Vec::with_capacity(1);
-        CLIENT_CANCEL.encode(&mut buf)?;
-        self.writer.write(buf.as_ref()).map_err(Into::into).await
+    pub(crate) fn cancel(&mut self) -> impl Future<Output = Result<()>> + '_ {
+        self.writer
+            .write_u8(CLIENT_CANCEL as u8)
+            .map_err(Into::into)
     }
 }
 
@@ -80,6 +79,18 @@ pub(crate) struct ResponseStream<'a, R: AsyncRead> {
     info: &'a mut ServerInfo,
     reader: LZ4ReadAdapter<BufReader<R>>,
     columns: Vec<BlockColumnHeader>,
+}
+
+impl<'a, R: AsyncRead + AsyncWrite + Unpin + Send> ResponseStream<'a, R> {
+    pub(crate) async fn write(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.reader.inner_ref().get_mut().write_all(buf).await
+    }
+
+    pub(crate) async fn cancel(&mut self) -> Result<()> {
+        CommandSink::new(self.reader.inner_ref().get_mut())
+            .cancel()
+            .await
+    }
 }
 
 impl<'a, R: AsyncRead + Unpin + Send> ResponseStream<'a, R> {
